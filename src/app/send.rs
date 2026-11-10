@@ -113,6 +113,10 @@ impl App {
                 self.clear_canvas();
                 return;
             }
+            Action::Quit => {
+                self.quit = true;
+                return;
+            }
         };
         self.last_error = result.err();
         self.dirty = true;

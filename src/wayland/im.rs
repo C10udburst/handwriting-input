@@ -7,8 +7,9 @@ use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_v2::{
     Event as ImEvent, ZwpInputMethodV2,
 };
 use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_device_v1::{
-    Event as DeviceEvent, ZwlrDataControlDeviceV1,
+    Event as DeviceEvent, ZwlrDataControlDeviceV1, EVT_DATA_OFFER_OPCODE,
 };
+use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_offer_v1::ZwlrDataControlOfferV1;
 use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_source_v1::{
     Event as SourceEvent, ZwlrDataControlSourceV1,
 };
@@ -87,6 +88,11 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for App {
     ) {
         // We only claim the clipboard; offers from others are ignored.
     }
+
+    // The `data_offer` event hands us a new offer object.
+    wayland_client::event_created_child!(App, ZwlrDataControlDeviceV1, [
+        EVT_DATA_OFFER_OPCODE => (ZwlrDataControlOfferV1, ())
+    ]);
 }
 
 impl Dispatch<ZwlrDataControlSourceV1, ClipboardPayload> for App {

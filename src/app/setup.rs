@@ -83,6 +83,11 @@ impl App {
         self.surface = Some(surface);
         self.layer = Some(layer);
         self.setup_injection();
+        // A layer surface is only mapped (and only then configured) once its
+        // wl_surface is committed, so do that here before waiting for it.
+        if let Some(surface) = self.surface.as_ref() {
+            surface.commit();
+        }
         Ok(())
     }
 

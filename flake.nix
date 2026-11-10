@@ -16,25 +16,36 @@
       system:
       let
         pkgs = import nixpkgs { inherit system; };
-        # Rust pinned per rustPlatform of this nixpkgs rev
+        # `wayland-sys` uses its `dlopen` backend (no pkg-config probing, which
+        # is also what lets plain `cargo build` work on NixOS), so nothing is
+        # linked at build time and the runtime loader must find libwayland,
+        # libvulkan and the GL driver: wrap the binary with them.
+        runtimeLibs = pkgs.lib.makeLibraryPath [
+          pkgs.wayland
+          pkgs.vulkan-loader
+          pkgs.libglvnd
+        ];
+
         mkHandwriting = pkgs.rustPlatform.buildRustPackage {
           pname = "handwriting-input";
           version = "0.1.0";
-          src = ./.; # clean source filter via lib.cleanSource
+          src = pkgs.lib.cleanSource ./.;
 
           cargoLock.lockFile = ./Cargo.lock;
-          # only needed if we add git deps:
-          # cargoLock.outputHashes = { ... };
+          # FILL ME IN after changing Cargo.lock: run
+          #   nix build .#handwriting-input 2>&1 | grep 'got:'
+          # and paste the hash it prints.
+          cargoHash = pkgs.lib.fakeHash;
 
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [
-            pkgs.wayland # libwayland (wayland-sys "system" or dlopen)
-            pkgs.libxkbcommon # xkbcommon for keymap generation
-          ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
 
-          # wgpu loads Vulkan/EGL at runtime via dlopen — no build-time need,
-          # but document runtime deps in meta + README.
-          doCheck = true; # cargo test (offline api tests)
+          doCheck = true; # offline unit tests only
+
+          postInstall = /* sh */ ''
+            wrapProgram $out/bin/handwriting-input \
+              --prefix LD_LIBRARY_PATH : "${runtimeLibs}:/run/opengl-driver/lib" \
+              --set VK_DRIVER_FILES "\${VK_DRIVER_FILES:-/run/opengl-driver/share/vulkan/icd.d}"
+          '';
 
           meta = {
             description = "Handwriting input keyboard using Google handwriting API on Wayland";
@@ -62,7 +73,7 @@
             pkgs.clippy
             pkgs.pkg-config
             pkgs.wayland
-            pkgs.libxkbcommon
+            pkgs.vulkan-loader
             pkgs.rust-analyzer
           ];
           env.RUST_LOG = "info";

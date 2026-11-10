@@ -19,6 +19,7 @@ use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::Zxd
 use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manager_v2::ZwpInputMethodManagerV2;
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
 use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1;
+use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_offer_v1::ZwlrDataControlOfferV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
 use crate::app::{App, OutputInfo};
@@ -129,6 +130,7 @@ wayland_client::delegate_noop!(App: ignore WpFractionalScaleManagerV1);
 wayland_client::delegate_noop!(App: ignore WpViewporter);
 wayland_client::delegate_noop!(App: ignore WpViewport);
 wayland_client::delegate_noop!(App: ignore ZwlrDataControlManagerV1);
+wayland_client::delegate_noop!(App: ignore ZwlrDataControlOfferV1);
 wayland_client::delegate_noop!(App: ignore ZwpInputMethodManagerV2);
 wayland_client::delegate_noop!(App: ignore ZwpVirtualKeyboardManagerV1);
 wayland_client::delegate_noop!(App: ignore ZwpVirtualKeyboardV1);

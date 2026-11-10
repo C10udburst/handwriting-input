@@ -48,6 +48,8 @@ pub enum Action {
     /// Send a special keysym (Enter / Backspace).
     Keysym(u32),
     ClearCanvas,
+    /// Close the panel (and therefore the app).
+    Quit,
 }
 
 pub struct App {

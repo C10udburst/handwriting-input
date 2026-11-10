@@ -1,6 +1,6 @@
 //! egui layout: candidate/control strip on top, handwriting canvas below.
 
-use egui::{Color32, Frame, Pos2, RichText, Stroke, Ui, Vec2};
+use egui::{Align, Color32, Frame, Layout, Pos2, RichText, Shape, Stroke, Ui, Vec2};
 
 use crate::app::{Action, App};
 use crate::ink::{Ink, Stroke as InkStroke};
@@ -36,12 +36,20 @@ fn controls(ui: &mut Ui, app: &mut App) {
 
     ui.horizontal(|ui| {
         for (label, hint, action) in [
-            ("✕", "Clear the canvas", Action::ClearCanvas),
-            ("⌫", "Backspace in the focused app", Action::Keysym(KEYSYM_BACKSPACE)),
-            ("⏎", "Enter in the focused app", Action::Keysym(KEYSYM_RETURN)),
+            ("×", "Clear the canvas", Action::ClearCanvas),
+            (
+                "del",
+                "Backspace in the focused app",
+                Action::Keysym(KEYSYM_BACKSPACE),
+            ),
+            (
+                "enter",
+                "Enter in the focused app",
+                Action::Keysym(KEYSYM_RETURN),
+            ),
         ] {
-            let button = egui::Button::new(RichText::new(label).size(18.0))
-                .min_size(Vec2::new(40.0, 30.0));
+            let size = if label.len() == 1 { 20.0 } else { 14.0 };
+            let button = egui::Button::new(RichText::new(label).size(size)).min_size(Vec2::new(42.0, 28.0));
             if ui.add(button).on_hover_text(hint).clicked() {
                 actions.push(action);
             }
@@ -53,6 +61,19 @@ fn controls(ui: &mut Ui, app: &mut App) {
         if app.ink.is_empty() && app.candidates.is_empty() && !app.busy {
             ui.label(RichText::new("draw here").weak().italics());
         }
+
+        // Close button, pinned to the right edge of the strip.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let quit = egui::Button::new(RichText::new("quit").size(13.0))
+                .min_size(Vec2::new(44.0, 24.0));
+            if ui
+                .add(quit)
+                .on_hover_text("Close the handwriting panel")
+                .clicked()
+            {
+                actions.push(Action::Quit);
+            }
+        });
     });
 
     ui.horizontal(|ui| {
@@ -116,7 +137,7 @@ fn canvas(ui: &mut Ui, app: &mut App, dark: bool) {
         );
     }
 
-    let ink = Stroke::new(
+    let style = Stroke::new(
         app.cfg.stroke_width,
         if dark {
             Color32::from_gray(235)
@@ -125,14 +146,15 @@ fn canvas(ui: &mut Ui, app: &mut App, dark: bool) {
         },
     );
     for stroke in &app.ink.strokes {
-        draw_stroke(&painter, rect.min.to_vec2(), stroke, ink);
+        draw_stroke(&painter, rect.min.to_vec2(), stroke, style);
     }
     if let Some(stroke) = &app.cur {
-        draw_stroke(&painter, rect.min.to_vec2(), stroke, ink);
+        draw_stroke(&painter, rect.min.to_vec2(), stroke, style);
     }
 }
 
-/// Stroke points are canvas-local; offset them into the allocated rect.
+/// One polyline per stroke: tessellating a single path avoids the dark seams
+/// that appear where separate anti-aliased segments overlap.
 fn draw_stroke(painter: &egui::Painter, offset: Vec2, stroke: &InkStroke, style: Stroke) {
     let points: Vec<Pos2> = stroke
         .points
@@ -141,10 +163,8 @@ fn draw_stroke(painter: &egui::Painter, offset: Vec2, stroke: &InkStroke, style:
         .collect();
     if points.len() == 1 {
         painter.circle_filled(points[0], style.width * 0.6, style.color);
-        return;
-    }
-    for window in points.windows(2) {
-        painter.line_segment([window[0], window[1]], style);
+    } else {
+        painter.add(Shape::line(points, style));
     }
 }
 
