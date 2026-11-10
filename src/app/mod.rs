@@ -48,6 +48,10 @@ pub enum Action {
     /// Send a special keysym (Enter / Backspace).
     Keysym(u32),
     ClearCanvas,
+    /// Remove the most recent stroke and re-recognise what is left.
+    UndoStroke,
+    /// Insert a space without touching the canvas.
+    Space,
     /// Close the panel (and therefore the app).
     Quit,
 }

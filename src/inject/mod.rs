@@ -168,9 +168,12 @@ impl VirtualKeyboard {
         }
     }
 
-    fn tap(&self, keycode: u16, delay: Duration) {
-        self.vk.key(now_millis(), keycode as u32, 1);
-        self.vk.key(now_millis(), keycode as u32, 0);
+    /// Tap one key. `xkb_keycode` comes from the builder; the protocol wants a
+    /// kernel keycode, hence the offset conversion.
+    fn tap(&self, xkb_keycode: u16, delay: Duration) {
+        let key = crate::inject::keymap::evdev_of(xkb_keycode) as u32;
+        self.vk.key(now_millis(), key, 1);
+        self.vk.key(now_millis(), key, 0);
         if !delay.is_zero() {
             std::thread::sleep(delay);
         }

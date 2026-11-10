@@ -22,21 +22,38 @@ pub const KEYSYM_RETURN: u32 = 0xff0d;
 pub const KEYSYM_TAB: u32 = 0xff09;
 pub const KEYSYM_ESCAPE: u32 = 0xff1b;
 
-/// Standard evdev codes for the special keys (also reserved from char use).
+/// Kernel (evdev) codes of the special keys.
 const KEY_ESC: u16 = 1;
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
 const KEY_RETURN: u16 = 28;
 
-/// Keycodes left alone so that modifiers and other hardware keys never collide.
+/// `zwp_virtual_keyboard_v1.key()` takes **kernel** keycodes while the keymap
+/// text is written in **XKB** keycodes, and every compositor maps between them
+/// with a fixed offset of 8 (`XKB = evdev + 8`). Everything stored in this
+/// builder is an XKB keycode; `evdev_of` converts when actually pressing keys.
+pub const XKB_OFFSET: u16 = 8;
+
+pub const fn evdev_of(xkb_keycode: u16) -> u16 {
+    xkb_keycode.saturating_sub(XKB_OFFSET)
+}
+
+pub const fn xkb_of(evdev: u16) -> u16 {
+    evdev + XKB_OFFSET
+}
+
+/// XKB keycodes of the special keys; kept out of character allocation.
 const RESERVED: &[u16] = &[
-    KEY_ESC, KEY_BACKSPACE, KEY_TAB, KEY_RETURN, 29, 36, 42, 50, 54, 62, 64, 97, 100, 105, 108,
+    xkb_of(KEY_ESC),
+    xkb_of(KEY_BACKSPACE),
+    xkb_of(KEY_TAB),
+    xkb_of(KEY_RETURN),
 ];
 
-const CODE_MIN: u16 = 8;
+const CODE_MIN: u16 = 9;
 const CODE_MAX: u16 = 255;
 
-/// A single key press: which keycode to tap. No modifiers, by design.
+/// A single key press: which XKB keycode to tap. No modifiers, by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyAction {
     pub keycode: u16,
@@ -106,10 +123,10 @@ impl KeymapBuilder {
             rendered: String::new(),
         };
         for (keysym, code) in [
-            (KEYSYM_BACKSPACE, KEY_BACKSPACE),
-            (KEYSYM_RETURN, KEY_RETURN),
-            (KEYSYM_TAB, KEY_TAB),
-            (KEYSYM_ESCAPE, KEY_ESC),
+            (KEYSYM_BACKSPACE, xkb_of(KEY_BACKSPACE)),
+            (KEYSYM_RETURN, xkb_of(KEY_RETURN)),
+            (KEYSYM_TAB, xkb_of(KEY_TAB)),
+            (KEYSYM_ESCAPE, xkb_of(KEY_ESC)),
         ] {
             kb.codes.insert(code, keysym);
             kb.specials.insert(keysym, code);
@@ -205,7 +222,7 @@ impl KeymapBuilder {
 
     fn render(&self) -> String {
         let mut s = String::with_capacity(8 * 1024);
-        s.push_str("xkb_keymap {\nxkb_keycodes \"hw\" {\n  minimum = 8;\n  maximum = 256;\n");
+        s.push_str("xkb_keymap {\nxkb_keycodes \"hw\" {\n  minimum = 8;\n  maximum = 255;\n");
         for code in self.codes.keys() {
             s.push_str(&format!("  <K{code}> = {code};\n"));
         }

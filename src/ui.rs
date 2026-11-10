@@ -37,6 +37,8 @@ fn controls(ui: &mut Ui, app: &mut App) {
     ui.horizontal(|ui| {
         for (label, hint, action) in [
             ("×", "Clear the canvas", Action::ClearCanvas),
+            ("undo", "Undo the last stroke", Action::UndoStroke),
+            ("space", "Type a space in the focused app", Action::Space),
             (
                 "del",
                 "Backspace in the focused app",
@@ -49,7 +51,9 @@ fn controls(ui: &mut Ui, app: &mut App) {
             ),
         ] {
             let size = if label.len() == 1 { 20.0 } else { 14.0 };
-            let button = egui::Button::new(RichText::new(label).size(size)).min_size(Vec2::new(42.0, 28.0));
+            let width = if label.len() == 1 { 34.0 } else { 52.0 };
+            let button = egui::Button::new(RichText::new(label).size(size))
+                .min_size(Vec2::new(width, 28.0));
             if ui.add(button).on_hover_text(hint).clicked() {
                 actions.push(action);
             }

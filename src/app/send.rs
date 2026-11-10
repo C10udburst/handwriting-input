@@ -113,6 +113,15 @@ impl App {
                 self.clear_canvas();
                 return;
             }
+            Action::UndoStroke => {
+                self.undo_stroke();
+                return;
+            }
+            Action::Space => {
+                let r = self.inject_text(" ");
+                self.last_error = r.err();
+                return;
+            }
             Action::Quit => {
                 self.quit = true;
                 return;

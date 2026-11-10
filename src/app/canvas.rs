@@ -63,6 +63,23 @@ impl App {
         self.dirty = true;
     }
 
+    /// Undo the last stroke: exactly what the user meant to erase. The dropped
+    /// stroke can carry an in-flight request's result away with it, so bump the
+    /// generation counter and ask again about what remains.
+    pub fn undo_stroke(&mut self) {
+        if self.ink.strokes.pop().is_none() {
+            return;
+        }
+        self.cur = None;
+        self.candidates.clear();
+        self.last_error = None;
+        self.abandon_recognition();
+        if !self.ink.is_empty() {
+            self.start_recognize();
+        }
+        self.dirty = true;
+    }
+
     /// Drop in-flight results so they can no longer update the UI.
     pub fn abandon_recognition(&mut self) {
         self.gen += 1;
