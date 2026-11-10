@@ -66,7 +66,6 @@ typing keeps working normally.
 | Control | Effect |
 |---|---|
 | draw | adds a stroke; recognition runs when the pen is lifted |
-| double tap the canvas | clear everything |
 | candidate | types it into the focused app (and clears the canvas) |
 | `×` | clear the canvas |
 | `undo` | drop the last stroke and re-recognise what is left |
@@ -162,7 +161,7 @@ src/main.rs            poll loop: Wayland socket + eventfd wake-ups
 src/app/mod.rs         App state, egui context, Action enum
 src/app/setup.rs       layer surface, scaling, binding the injection objects
 src/app/render.rs      wgpu surface + egui-wgpu frame, commit
-src/app/canvas.rs      strokes, double-tap, undo
+src/app/canvas.rs      strokes, undo
 src/app/recognize.rs   generation-counter guarded API round-trips
 src/app/send.rs        which injection layer gets the text
 src/app/fonts.rs       CJK fallback discovery

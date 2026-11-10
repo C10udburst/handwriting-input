@@ -1,28 +1,14 @@
-//! Canvas gestures: drawing strokes, double-tap to clear.
-
-use std::time::{Duration, Instant};
+//! Canvas gestures: drawing strokes and handing them to recognition.
 
 use egui::Pos2;
 
 use super::App;
 use crate::ink::Stroke;
 
-/// Press interval that counts as "double tap" (clear the canvas).
-const DOUBLE_TAP: Duration = Duration::from_millis(350);
-
 impl App {
-    /// Pointer/touch went down: start a stroke, or clear on a double tap.
+    /// Pointer/touch went down: start a new stroke.
     pub fn on_press(&mut self, at: Pos2) {
         if !self.canvas_rect.contains(at) {
-            return;
-        }
-        if self
-            .last_release
-            .is_some_and(|t| t.elapsed() < DOUBLE_TAP)
-            && (!self.ink.is_empty() || !self.candidates.is_empty())
-        {
-            self.clear_canvas();
-            self.last_release = None;
             return;
         }
         let mut stroke = Stroke::default();
@@ -48,7 +34,6 @@ impl App {
             if !stroke.is_empty() {
                 self.ink.strokes.push(stroke);
             }
-            self.last_release = Some(Instant::now());
             self.start_recognize();
         }
         self.dirty = true;
