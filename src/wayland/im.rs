@@ -1,4 +1,4 @@
-//! zwp_input_method_v2 client glue + zwlr-data-control data source.
+//! `zwp_input_method_v2` state tracking and the `zwlr_data_control` source.
 
 use std::io::Write;
 
@@ -25,12 +25,19 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
         _: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        // A second IM on the seat makes this one permanently useless.
+        if matches!(event, ImEvent::Unavailable) {
+            eprintln!("input method unavailable (another IM holds the seat); using fallbacks");
+            app.im = None;
+            app.dirty = true;
+            return;
+        }
         let Some(ctl) = app.im.as_mut() else {
             return;
         };
         match event {
             ImEvent::Activate => {
-                // activate resets all double-buffered state
+                // Activation resets all double-buffered state.
                 ctl.state.active = true;
                 ctl.state.surrounding.clear();
                 ctl.state.cursor = 0;
@@ -41,6 +48,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
             }
             ImEvent::Deactivate => {
                 ctl.state.active = false;
+                ctl.state.last_preedit_sent = None;
                 app.dirty = true;
             }
             ImEvent::SurroundingText {
@@ -53,18 +61,15 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 ctl.state.cursor = cursor as usize;
                 ctl.state.anchor = anchor as usize;
             }
-            ImEvent::TextChangeCause { cause: _ } => {}
-            ImEvent::ContentHintPurpose { hint, purpose } => {
-                ctl.state.content_hint = hint;
-                ctl.state.content_purpose = purpose;
+            // Store the raw enum values; `u32` conversion keeps the code
+            // independent of unknown-variant handling.
+            ImEvent::ContentType { hint, purpose } => {
+                ctl.state.content_hint = hint.into();
+                ctl.state.content_purpose = purpose.into();
             }
+            ImEvent::TextChangeCause { .. } => {}
             ImEvent::Done => {
                 ctl.state.serial = ctl.state.serial.wrapping_add(1);
-            }
-            ImEvent::Unavailable => {
-                // Another input method was already active on this seat.
-                eprintln!("input method unavailable (another IM on seat); using fallbacks");
-                app.im = None;
             }
             _ => {}
         }
@@ -80,7 +85,7 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for App {
         _: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        // We only set the clipboard; ignore offers from others.
+        // We only claim the clipboard; offers from others are ignored.
     }
 }
 
@@ -93,14 +98,13 @@ impl Dispatch<ZwlrDataControlSourceV1, ClipboardPayload> for App {
         _: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        match event {
-            SourceEvent::Send { fd } => {
+        // The compositor asks per mime type; we only ever offer plain text.
+        if let SourceEvent::Send { fd, mime_type } = event {
+            if mime_type.starts_with("text/") {
                 let text = payload.0.lock().unwrap().clone().unwrap_or_default();
                 let mut file = std::fs::File::from(fd);
                 let _ = file.write_all(text.as_bytes());
             }
-            SourceEvent::Cancelled => {}
-            _ => {}
         }
     }
 }

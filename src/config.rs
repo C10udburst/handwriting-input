@@ -1,10 +1,23 @@
 //! All application options live in a TOML config file; the only CLI argument is the config path.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+
+fn default_config_path() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("handwriting-input").join("config.toml");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("handwriting-input")
+        .join("config.toml")
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -14,27 +27,22 @@ use serde::{Deserialize, Serialize};
 )]
 pub struct Cli {
     /// Path to the TOML config file (created with defaults when missing)
-    #[arg(default_value = default_config_path().as_os_str())]
-    pub config: std::path::PathBuf,
-}
-
-fn default_config_path() -> std::path::PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return std::path::PathBuf::from(xdg).join("handwriting-input").join("config.toml");
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".config").join("handwriting-input").join("config.toml")
+    #[arg(default_value_os_t = default_config_path())]
+    pub config: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SendMode {
+    /// input method when a text field is focused, else virtual keyboard, else clipboard
     Auto,
+    /// only zwp_input_method_v2 (commit_string / preedit / surrounding delete)
     InputMethod,
+    /// only zwp_virtual_keyboard_v1 (keysym typing)
     Virtual,
+    /// never type: copy to clipboard instead
     Clipboard,
+    /// do nothing on commit
     None,
 }
 
@@ -63,7 +71,9 @@ pub enum LayerMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MultiLang {
+    /// one request with a language array; falls back to per-language requests
     Auto,
+    /// always one request per language
     Parallel,
 }
 
@@ -109,7 +119,6 @@ impl Default for Config {
                 ".".to_string(),
                 "?".to_string(),
                 "!".to_string(),
-                "'".to_string(),
             ],
             font_file: None,
             auto_cjk_font: true,
@@ -124,6 +133,7 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Read `path`; when missing, write the defaults there and use them.
     pub fn load(path: &Path) -> Result<Config, String> {
         match fs::read_to_string(path) {
             Ok(s) => {
@@ -152,5 +162,6 @@ impl Config {
         }
         self.num_candidates = self.num_candidates.clamp(1, 64);
         self.height = self.height.clamp(120, 2000);
+        self.context_chars = self.context_chars.clamp(0, 512);
     }
 }

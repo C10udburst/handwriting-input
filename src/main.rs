@@ -1,4 +1,8 @@
-//! Entry point: config → Wayland connect → roundtrip → GPU init → egui event loop.
+//! Entry point: config → Wayland connect → setup → GPU → event loop.
+//!
+//! The loop polls the Wayland socket together with an eventfd that egui's
+//! repaint callback (running on any thread, including recognition workers)
+//! writes to. Deferred repaints become due inside `App::poll_timeout_ms`.
 
 mod api;
 mod app;
@@ -12,6 +16,7 @@ mod wayland;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::sync::Arc;
 use std::time::Instant;
 
 use clap::Parser;
@@ -19,38 +24,35 @@ use wayland_client::Connection;
 
 use app::App;
 
-/// Wake-up pipe (eventfd) written by egui's repaint callback (any thread).
+/// One-way wake-up channel (eventfd) shared with egui's repaint callback.
 #[derive(Clone)]
-struct Wake(File);
+struct Wake(Arc<File>);
 
 impl Wake {
     fn new() -> std::io::Result<Wake> {
-        let fd = unsafe {
-            libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK)
-        };
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(Wake(unsafe { File::from_raw_fd(fd) }))
+        Ok(Wake(Arc::new(unsafe { File::from_raw_fd(fd) })))
     }
+
     fn notify(&self) {
-        let mut f = &self.0;
-        let _ = f.write_all(&1u64.to_ne_bytes());
+        let mut writer: &File = &self.0;
+        let _ = writer.write_all(&1u64.to_ne_bytes());
     }
+
     fn drain(&self) {
         let mut buf = [0u8; 16];
-        let mut f = &self.0;
-        while f.read(&mut buf).unwrap_or(0) > 0 {}
-    }
-    fn fd(&self) -> i32 {
-        self.0.as_raw_fd()
+        let mut reader: &File = &self.0;
+        while reader.read(&mut buf).unwrap_or(0) > 0 {}
     }
 }
 
 fn main() -> std::process::ExitCode {
     let cli = config::Cli::parse();
     let cfg = match config::Config::load(&cli.config) {
-        Ok(c) => c,
+        Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("config error: {e}");
             return std::process::ExitCode::FAILURE;
@@ -66,8 +68,8 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(cfg: config::Config) -> Result<(), String> {
-    let conn = Connection::connect_to_env()
-        .map_err(|e| format!("cannot connect to a Wayland compositor: {e}"))?;
+    let conn =
+        Connection::connect_to_env().map_err(|e| format!("cannot connect to a Wayland compositor: {e}"))?;
     let mut queue = conn.new_event_queue::<App>();
     let qh = queue.handle();
 
@@ -77,7 +79,7 @@ fn run(cfg: config::Config) -> Result<(), String> {
         .map_err(|e| format!("wayland roundtrip: {e}"))?;
     app.after_globals()?;
 
-    // Wait for the first layer-surface configure (it tells us the size).
+    // The first layer configure carries our size; GPU setup needs it.
     while !app.configured && !app.quit {
         queue
             .blocking_dispatch(&mut app)
@@ -86,22 +88,21 @@ fn run(cfg: config::Config) -> Result<(), String> {
     if app.quit {
         return Ok(());
     }
-
     app.init_gpu()?;
 
-    // Repaint wake-ups (egui, recognition results, timers) go through an eventfd.
     let wake = Wake::new().map_err(|e| format!("eventfd: {e}"))?;
     let wake_cb = wake.clone();
+    let sched = app.repaint_sched.clone();
     app.ctx.set_request_repaint_callback(move |info| {
-        *app.repaint_sched.lock().unwrap() = Some(Instant::now() + info.delay);
+        *sched.lock().unwrap() = Some(Instant::now() + info.delay);
         wake_cb.notify();
     });
 
     loop {
         let _ = queue.flush();
         let _ = queue.dispatch_pending(&mut app);
-
         app.drain_results();
+
         if app.dirty {
             app.dirty = false;
             app.run_frame()?;
@@ -116,40 +117,38 @@ fn run(cfg: config::Config) -> Result<(), String> {
             continue;
         }
 
-        // Arm the socket read *before* polling so no event can slip through.
+        // Arm the socket read *before* polling, so no event can slip past us.
         let read_guard = queue.prepare_read();
         let mut fds = [
             libc::pollfd {
-                fd: wake.fd(),
+                fd: wake.0.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
             libc::pollfd {
-                fd: match &read_guard {
-                    Some(g) => g.connection_fd().as_raw_fd(),
-                    None => -1,
-                }, // must be armed before polling
+                fd: read_guard
+                    .as_ref()
+                    .map(|guard| guard.connection_fd().as_raw_fd())
+                    .unwrap_or(-1),
                 events: libc::POLLIN,
                 revents: 0,
             },
         ];
-        let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as u32, timeout) };
-        if r < 0 {
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
+        if ready < 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
-                drop(read_guard);
-                continue;
+                continue; // guard drop cancels the prepared read
             }
             return Err(format!("poll: {err}"));
         }
         if fds[0].revents != 0 {
             wake.drain();
         }
-        if let Some(g) = read_guard {
+        if let Some(guard) = read_guard {
             if fds[1].revents != 0 {
-                g.read().map_err(|e| format!("wayland read: {e}"))?;
+                guard.read().map_err(|e| format!("wayland read: {e}"))?;
             }
         }
     }
 }
-

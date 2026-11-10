@@ -10,8 +10,11 @@ egui = { version = "0.37", default-features = false }
 egui-wgpu = { version = "0.37", default-features = false, features = ["wayland"] }
 wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
 
-wayland-client = "0.31"
-wayland-backend = { version = "0.3", features = ["dlopen"] }
+# `system` selects the libwayland (sys) backend — the only backend that exposes
+# raw wl_surface/wl_display pointers, which wgpu needs to present to our surface.
+# `dlopen` stops wayland-sys from probing pkg-config at build time (NixOS has
+# none); libwayland is loaded dynamically at runtime instead.
+wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
@@ -19,5 +22,11 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ureq = { version = "3", default-features = false, features = ["gzip"] }
+toml = "1"
+ureq = { version = "3", default-features = false, features = ["gzip", "rustls"] }
 libc = "0.2"
+pollster = "1"
+
+[profile.release]
+lto = "thin"
+strip = true

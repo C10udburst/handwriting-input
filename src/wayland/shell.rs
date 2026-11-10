@@ -1,12 +1,14 @@
-//! Layer-shell surface, outputs, fractional scale, viewporter.
+//! Layer surface, outputs, xdg-output logical sizes, fractional scale.
 
-use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_output::{Event as OutputEvent, WlOutput};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::{
-    Event as FracEvent, WpFractionalScaleV1,
+    Event as FractionalEvent, WpFractionalScaleV1,
 };
-use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{Event as XdgEvent, ZxdgOutputV1};
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{
+    Event as XdgOutputEvent, ZxdgOutputV1,
+};
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     Event as LayerEvent, ZwlrLayerSurfaceV1,
 };
@@ -29,12 +31,17 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
                 height,
             } => {
                 layer.ack_configure(serial);
+                // 0 means "use the whole axis"; fall back to the output size.
                 let w = if width == 0 {
-                    app.first_output_logical_width()
+                    app.output_logical_width()
                 } else {
                     width
                 };
-                let h = if height == 0 { app.cfg.height } else { height };
+                let h = if height == 0 {
+                    app.cfg.height
+                } else {
+                    height
+                };
                 app.logical_size = (w.max(1), h.max(1));
                 app.configured = true;
                 app.needs_surface_reconfigure = true;
@@ -52,24 +59,20 @@ impl Dispatch<WlOutput, ()> for App {
     fn event(
         app: &mut Self,
         output: &WlOutput,
-        event: wayland_client::protocol::wl_output::Event,
+        event: OutputEvent,
         _: &(),
         _: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        use wayland_client::protocol::wl_output::Event as OutEvent;
-        let Some(entry) = app.outputs.iter_mut().find(|o| o.output.id() == output.id()) else {
+        let Some(entry) = app.outputs.iter_mut().find(|o| o.output == *output) else {
             return;
         };
         match event {
-            OutEvent::Scale { factor } => {
-                entry.scale = factor.max(1);
+            OutputEvent::Scale { factor } if factor > 0 => {
+                entry.scale = factor as u32;
                 app.refresh_scale();
             }
-            OutEvent::Geometry { .. } => {
-                app.refresh_scale();
-            }
-            OutEvent::Done => {
+            OutputEvent::Done => {
                 app.refresh_scale();
             }
             _ => {}
@@ -80,26 +83,21 @@ impl Dispatch<WlOutput, ()> for App {
 impl Dispatch<ZxdgOutputV1, ()> for App {
     fn event(
         app: &mut Self,
-        xdg: &ZxdgOutputV1,
-        event: XdgEvent,
+        xdg_output: &ZxdgOutputV1,
+        event: XdgOutputEvent,
         _: &(),
         _: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        match event {
-            XdgEvent::LogicalSize { width, height } => {
-                // xdg_outputs[i] corresponds to outputs[i] (created in order).
-                if let Some(idx) = app.xdg_outputs.iter().position(|o| o.id() == xdg.id()) {
-                    if let Some(entry) = app.outputs.get_mut(idx) {
-                        entry.logical_size = (width.max(0) as u32, height.max(0) as u32);
-                    }
-                }
-                app.dirty = true;
+        // xdg_outputs[i] was created right after outputs[i].
+        let Some(index) = app.xdg_outputs.iter().position(|o| o == xdg_output) else {
+            return;
+        };
+        if let XdgOutputEvent::LogicalSize { width, height } = event {
+            if let Some(entry) = app.outputs.get_mut(index) {
+                entry.logical_size = (width.max(0) as u32, height.max(0) as u32);
             }
-            XdgEvent::LogicalPosition { .. } | XdgEvent::Done => {
-                app.dirty = true;
-            }
-            _ => {}
+            app.dirty = true;
         }
     }
 }
@@ -108,15 +106,16 @@ impl Dispatch<WpFractionalScaleV1, ()> for App {
     fn event(
         app: &mut Self,
         _scale: &WpFractionalScaleV1,
-        event: FracEvent,
+        event: FractionalEvent,
         _: &(),
         _: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let FracEvent::PreferredScale { scale } = event {
-            let f = scale.to_f64() as f32;
-            if f > 0.0 {
-                app.ppp = f;
+        if let FractionalEvent::PreferredScale { scale } = event {
+            // The protocol sends the numerator of a fraction over 120.
+            let value = scale as f32 / 120.0;
+            if value > 0.0 && (app.ppp - value).abs() > f32::EPSILON {
+                app.ppp = value;
                 app.needs_surface_reconfigure = true;
                 app.dirty = true;
             }

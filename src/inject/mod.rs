@@ -1,40 +1,57 @@
-//! Text/key injection into the focused application.
+//! Text and key injection into the focused application.
 //!
-//! Layers (selection order decided in `inject_text`):
-//! 1. `zwp_input_method_v2` — whole-string commits at the caret (primary).
-//! 2. `zwp_virtual_keyboard_v1` — keys routed through our XKB keymap (fallback).
-//! 3. Clipboard via ext-data-control — copy only.
+//! Three layers, chosen at commit time by [`crate::app::App::inject_text`]:
+//! 1. `zwp_input_method_v2` — whole strings committed at the caret, live preedit,
+//!    surrounding-text aware backspace, and the source of `pre_context`.
+//! 2. `zwp_virtual_keyboard_v1` — keycodes through our generated XKB keymap.
+//! 3. `zwlr_data_control_v1` — clipboard copy only (last resort).
 
-use std::io::Write;
-use std::sync::Mutex;
+pub mod keymap;
 
-use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{Connection, QueueHandle};
-use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_v2::{
-    ZwpInputMethodV2,
-};
-use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_device_v1::{
-    ZwlrDataControlDeviceV1, ZwlrDataControlDeviceV1Event,
-};
-use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_source_v1::{
-    ZwlrDataControlSourceV1, ZwlrDataControlSourceV1Event,
-};
+use std::os::fd::AsFd;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::inject::keymap::{action_for_char, assign, ensure_text, action_for_keysym, codes, chars, dirty, render, keymap_text, keymap_memfd, code_max, next_dynamic, dynamic_order, extended_static};
+use wayland_client::QueueHandle;
+use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_v2::ZwpInputMethodV2;
+use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_device_v1::ZwlrDataControlDeviceV1;
+use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1;
 
-/// Mirrors the double-buffered state delivered by `zwp_input_method_v2` events.
-#[derive(Default, Clone)]
+use crate::app::App;
+use keymap::{keymap_memfd, KeymapBuilder};
+
+pub use keymap::{KEYSYM_BACKSPACE, KEYSYM_RETURN};
+
+/// Monotonic-ish timestamp in ms for `virtual_keyboard.key` events.
+fn now_millis() -> u32 {
+    static BASE: AtomicU32 = AtomicU32::new(0);
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_millis())
+        .unwrap_or(0);
+    BASE.fetch_add(1, Ordering::Relaxed) ^ ms
+}
+
+// ---------------------------------------------------------------------------
+// 1. input method
+// ---------------------------------------------------------------------------
+
+/// Double-buffered state delivered by `zwp_input_method_v2` events.
+#[derive(Default)]
 pub struct ImState {
     pub active: bool,
     pub serial: u32,
+    pub unavailable: bool,
+    /// Text around the caret, if the client supports it.
     pub surrounding: String,
     pub cursor: usize,
     pub anchor: usize,
     pub supports_surrounding: bool,
-    pub saw_surrounding_or_done: bool,
-    pub content_purpose: u32,
+    /// Raw `zwp_text_input_v3.content_hint` / `.content_purpose` values.
     pub content_hint: u32,
-    pub unavailable: bool,
+    pub content_purpose: u32,
+    /// Last preedit string sent, to avoid redundant round-trips.
     pub last_preedit_sent: Option<String>,
 }
 
@@ -44,9 +61,17 @@ pub struct InputMethodCtl {
 }
 
 impl InputMethodCtl {
+    pub fn new(im: ZwpInputMethodV2) -> Self {
+        Self {
+            im,
+            state: ImState::default(),
+        }
+    }
+
+    /// Commit a whole string at the caret (words, punctuation, candidate picks).
     pub fn commit_text(&self, text: &str) {
-        self.im.commit_string(text.to_string());
         self.im.set_preedit_string(String::new(), 0, 0);
+        self.im.commit_string(text.to_string());
         self.im.commit(self.state.serial);
     }
 
@@ -60,7 +85,8 @@ impl InputMethodCtl {
         self.im.commit(self.state.serial);
     }
 
-    /// Delete `bytes` characters before the caret (using surrounding text info).
+    /// Delete text before the caret. Needs surrounding-text support; returns
+    /// false when the client gave us nothing to work with.
     pub fn delete_before_caret(&self, bytes: Option<usize>) -> bool {
         if !self.state.supports_surrounding || self.state.cursor == 0 {
             return false;
@@ -75,13 +101,14 @@ impl InputMethodCtl {
         true
     }
 
+    /// Up to `max_chars` of text just before the caret: the `pre_context` that
+    /// makes Google's recogniser much better at connected handwriting.
     pub fn context_before(&self, max_chars: usize) -> Option<String> {
         if !self.state.supports_surrounding || self.state.cursor == 0 {
             return None;
         }
         let cut = self.state.cursor.min(self.state.surrounding.len());
-        let before = &self.state.surrounding[..cut];
-        let mut out: Vec<char> = before.chars().rev().take(max_chars).collect();
+        let mut out: Vec<char> = self.state.surrounding[..cut].chars().rev().take(max_chars).collect();
         out.reverse();
         let s: String = out.into_iter().collect();
         if s.is_empty() {
@@ -92,87 +119,85 @@ impl InputMethodCtl {
     }
 }
 
+/// UTF-8 length of the character ending just before byte offset `cursor`.
 fn prev_char_len(s: &str, cursor: usize) -> usize {
     let cut = cursor.min(s.len());
     let mut idx = cut;
     while idx > 0 {
-        let prev = s.as_bytes()[idx - 1];
-        if prev & 0xC0 == 0x80 {
+        if s.as_bytes()[idx - 1] & 0xC0 == 0x80 {
             idx -= 1;
-            continue;
+        } else {
+            break;
         }
-        break;
     }
     cut - idx
 }
 
 // ---------------------------------------------------------------------------
-// virtual keyboard (fallback + keys)
+// 2. virtual keyboard
 // ---------------------------------------------------------------------------
 
 pub struct VirtualKeyboard {
-    vk: ZwpVirtualKeyboardV1,
-    pub keymap: KeymapBuilder,
+    vk: wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
+    keymap: KeymapBuilder,
+    /// The memfd backing the current keymap must stay open while the compositor uses it.
     _keymap_file: Option<std::fs::File>,
 }
 
 impl VirtualKeyboard {
-    pub fn new(vk: ZwpVirtualKeyboardV1) -> Self {
-        let mut kb = Self {
+    pub fn new(vk: wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1) -> Self {
+        let mut this = Self {
             vk,
             keymap: KeymapBuilder::new(),
             _keymap_file: None,
         };
-        kb.push_keymap();
-        kb.vk.modifiers(0, 0, 0, 0);
-        kb
+        this.push_keymap();
+        this.vk.modifiers(0, 0, 0, 0);
+        this
     }
 
+    /// Send the generated keymap (XKB_V1 format) to the compositor.
     fn push_keymap(&mut self) {
         let text = self.keymap.keymap_text().to_owned();
         match keymap_memfd(&text) {
             Ok(file) => {
-                let size = text.len() as u32;
-                self.vk.keymap(1, &file, size); // KEYMAP_FORMAT_XKB_V1 = 1
+                self.vk.keymap(1, file.as_fd(), text.len() as u32);
                 self._keymap_file = Some(file);
             }
             Err(e) => eprintln!("keymap memfd failed: {e}"),
         }
     }
 
-    fn press_release(&self, act: KeyAction, delay: std::time::Duration) {
-        if act.shift {
-            // In our keymap the shift level is declared via types, not a hardware key.
-            self.vk.modifiers(1 << 0, 0, 0, 0);
-        }
-        self.vk.key(now_millis(), act.keycode as u32, 1); // PRESSED
-        self.vk.key(now_millis(), act.keycode as u32, 0); // RELEASED
-        if act.shift {
-            self.vk.modifiers(0, 0, 0, 0);
-        }
+    fn tap(&self, keycode: u16, delay: Duration) {
+        self.vk.key(now_millis(), keycode as u32, 1);
+        self.vk.key(now_millis(), keycode as u32, 0);
         if !delay.is_zero() {
             std::thread::sleep(delay);
         }
     }
 
-    pub fn send_text(&mut self, text: &str, delay: std::time::Duration) -> Result<(), String> {
-        if !ensure_text(&mut self.keymap, text) {
-            return Err("keymap space exhausted".into());
+    /// Type `text` one character at a time through the generated keymap.
+    pub fn send_text(&mut self, text: &str, delay: Duration) -> Result<(), String> {
+        if !self.keymap.ensure_text(text) {
+            return Err("ran out of keymap slots for this text".into());
         }
-        if dirty(&self.keymap) {
+        if self.keymap.is_dirty() {
             self.push_keymap();
         }
         for c in text.chars() {
-            let act = action_for_char(&self.keymap, c)
-                .ok_or_else(|| format!("no keymap slot for {c:?}"))?;
-            self.press_release(act, delay);
+            let action = self
+                .keymap
+                .action_for_char(c)
+                .ok_or_else(|| format!("no keycode assigned for {c:?}"))?;
+            self.tap(action.keycode, delay);
         }
         Ok(())
     }
 
-    pub fn send_keysym(&mut self, keysym: u32, delay: std::time::Duration) -> Result<(), String> {
-        if let Some(act) = action_for_keysym(&self.keymap, keysym) {
-            self.press_release(act, delay);
+    /// Press a special key (Enter, Backspace, Tab, Escape).
+    pub fn send_keysym(&mut self, keysym: u32, delay: Duration) -> Result<(), String> {
+        if let Some(action) = self.keymap.action_for_keysym(keysym) {
+            self.tap(action.keycode, delay);
             return Ok(());
         }
         if let Some(c) = char::from_u32(keysym) {
@@ -183,10 +208,10 @@ impl VirtualKeyboard {
 }
 
 // ---------------------------------------------------------------------------
-// clipboard (last resort)
+// 3. clipboard (last resort)
 // ---------------------------------------------------------------------------
 
-/// Payload shared with ext-data-control source dispatch.
+/// Text handed to the data-control source when the compositor asks for it.
 #[derive(Clone, Default)]
 pub struct ClipboardPayload(pub Arc<Mutex<Option<String>>>);
 
@@ -194,4 +219,22 @@ pub struct ClipboardCtl {
     pub mgr: ZwlrDataControlManagerV1,
     pub device: ZwlrDataControlDeviceV1,
     pub payload: ClipboardPayload,
+}
+
+impl ClipboardCtl {
+    pub fn new(mgr: ZwlrDataControlManagerV1, device: ZwlrDataControlDeviceV1) -> Self {
+        Self {
+            mgr,
+            device,
+            payload: ClipboardPayload::default(),
+        }
+    }
+
+    /// Claim the clipboard with `text`. A fresh source per copy keeps older
+    /// paste targets from seeing stale content.
+    pub fn copy(&self, text: &str, qh: &QueueHandle<App>) {
+        *self.payload.0.lock().unwrap() = Some(text.to_string());
+        let source = self.mgr.create_data_source(qh, self.payload.clone());
+        self.device.set_selection(Some(&source));
+    }
 }
