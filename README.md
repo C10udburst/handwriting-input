@@ -8,6 +8,9 @@ Recognition is done by Google's handwriting API (the same endpoint the Chrome OS
 virtual keyboard uses), so Latin scripts recognise very well and CJK works as a
 bonus. **See [Privacy](#privacy) before using it.**
 
+![The panel anchored at the bottom of the screen, with drawn strokes and a row of
+candidates above them](.github/screenshot.png)
+
 ## Requirements
 
 | | |
