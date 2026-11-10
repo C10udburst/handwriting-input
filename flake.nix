@@ -64,6 +64,13 @@
           program = "${mkHandwriting}/bin/handwriting-input";
         };
 
+        # Same runtime libraries the wrapped binary gets, so `cargo run` works.
+        devShellLibs = pkgs.lib.makeLibraryPath [
+          pkgs.wayland
+          pkgs.vulkan-loader
+          pkgs.libglvnd
+        ];
+
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.rustc
@@ -76,6 +83,7 @@
             pkgs.rust-analyzer
           ];
           env.RUST_LOG = "info";
+          env.LD_LIBRARY_PATH = "\${devShellLibs}:/run/opengl-driver/lib";
         };
 
         checks = {
