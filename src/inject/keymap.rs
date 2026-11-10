@@ -251,3 +251,86 @@ pub fn keymap_memfd(text: &str) -> Result<std::fs::File, std::io::Error> {
     file.seek(SeekFrom::Start(0))?;
     Ok(file)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `key()` carries kernel keycodes while the keymap is written
+    /// in XKB keycodes. Sending the stored value directly used to type `,`
+    /// where BackSpace was intended (evdev 14 → XKB 22, a character slot).
+    #[test]
+    fn special_keys_survive_the_kernel_to_xkb_offset() {
+        let kb = KeymapBuilder::new();
+        for (keysym, evdev) in [
+            (KEYSYM_BACKSPACE, KEY_BACKSPACE),
+            (KEYSYM_RETURN, KEY_RETURN),
+            (KEYSYM_TAB, KEY_TAB),
+            (KEYSYM_ESCAPE, KEY_ESC),
+        ] {
+            let action = kb.action_for_keysym(keysym).expect("special key assigned");
+            assert_eq!(action.keycode, xkb_of(evdev));
+            assert_eq!(evdev_of(action.keycode), evdev);
+        }
+    }
+
+    #[test]
+    fn static_chars_get_unique_usable_keycodes() {
+        let kb = KeymapBuilder::new();
+        assert!(!kb.codes.is_empty());
+        // Only the special keys may sit on a reserved keycode.
+        for (c, code) in &kb.chars {
+            assert!(
+                (CODE_MIN..=CODE_MAX).contains(code),
+                "code {code} for {c:?} out of range"
+            );
+            assert!(!RESERVED.contains(code), "reserved code {code} used by {c:?}");
+        }
+        let mut seen: Vec<u16> = Vec::new();
+        for code in kb.codes.keys() {
+            assert!(!seen.contains(code), "keycode {code} used twice");
+            seen.push(*code);
+        }
+        assert_eq!(seen.len(), kb.chars.len() + kb.specials.len());
+        for c in ['a', 'Z', '0', ' ', 'ą', 'ß', 'ż', '—'] {
+            assert!(kb.action_for_char(c).is_some(), "missing static slot for {c:?}");
+        }
+    }
+
+    #[test]
+    fn dynamic_allocation_recycles_without_duplicates() {
+        let mut kb = KeymapBuilder::new();
+        // Far more characters than there are keycodes left.
+        let heavy: String = (0x4e00u32..0x4e00u32 + 1200).filter_map(char::from_u32).collect();
+        assert!(kb.ensure_text(&heavy), "allocation should never fail outright");
+        let mut seen: Vec<u16> = Vec::new();
+        for code in kb.codes.keys() {
+            assert!(!seen.contains(code), "keycode {code} used twice");
+            seen.push(*code);
+        }
+        assert!(seen.len() <= (CODE_MAX - CODE_MIN + 1) as usize);
+        // The static slots must still be reachable after the churn.
+        assert!(kb.action_for_char('a').is_some());
+    }
+
+    #[test]
+    fn rendered_keymap_declares_every_assignment() {
+        let mut kb = KeymapBuilder::new();
+        kb.ensure_text("zażółć gęślą jaźń");
+        let text = kb.keymap_text().to_owned();
+        assert!(text.starts_with("xkb_keymap {"));
+        assert!(text.contains("minimum = 8"));
+        for (code, keysym) in &kb.codes {
+            assert!(
+                text.contains(&format!("<K{code}> = {code};")),
+                "missing keycodes entry for {code}"
+            );
+            assert!(
+                text.contains(&format!("key <K{code}> {{ type[Group1]=\"ONE\", [ 0x{keysym:08x} ] }};")),
+                "missing symbols entry for {code}"
+            );
+        }
+        // BackSpace keysym must be present as a symbol, not as some letter.
+        assert!(text.contains("0x0000ff08"));
+    }
+}

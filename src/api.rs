@@ -186,3 +186,114 @@ pub fn merge(outcomes: &[Outcome], cap: usize) -> Vec<Candidate> {
     out.truncate(cap);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn outcome(lang: &str, candidates: &[&str]) -> Outcome {
+        Outcome {
+            gen: 1,
+            lang: lang.to_string(),
+            result: Ok(candidates.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn parses_the_nested_candidate_list() {
+        let body = r#"[[1,2,3],[[null,["hello","hell","hallo"]]]]"#;
+        assert_eq!(parse_response(body).unwrap(), vec!["hello", "hell", "hallo"]);
+    }
+
+    #[test]
+    fn empty_candidates_are_dropped() {
+        let body = r#"[[1],[[null,["ok","","  ","nope"]]]]"#;
+        assert_eq!(parse_response(body).unwrap(), vec!["ok", "  ", "nope"]);
+    }
+
+    #[test]
+    fn single_element_payload_is_reported_as_an_error() {
+        let body = r#"["no candidates found"]"#;
+        assert_eq!(parse_response(body).unwrap_err(), "no candidates found");
+    }
+
+    #[test]
+    fn malformed_payloads_fail_loudly() {
+        assert!(parse_response("not json").is_err());
+        assert!(parse_response("[[1],[[null]]]").is_err());
+        assert!(parse_response("{}").is_err());
+    }
+
+    #[test]
+    fn one_language_means_one_request_tagged_with_it() {
+        let mut cfg = Config::default();
+        cfg.langs = vec!["pl".to_string()];
+        let specs = request_specs(&cfg, None, 7, "tekst ");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].0, "pl");
+        assert_eq!(specs[0].1.language, json!("pl"));
+        assert_eq!(specs[0].1.pre_context, "tekst ");
+        assert_eq!(specs[0].1.sequence_id, 7);
+    }
+
+    #[test]
+    fn multi_language_starts_combined_and_falls_back_per_language() {
+        let mut cfg = Config::default();
+        cfg.langs = vec!["pl".to_string(), "en".to_string()];
+
+        let combined = request_specs(&cfg, None, 0, "");
+        assert_eq!(combined.len(), 1, "first round should probe with one request");
+        assert_eq!(combined[0].0, MULTI);
+        assert_eq!(combined[0].1.language, json!(["pl", "en"]));
+
+        let split = request_specs(&cfg, Some(false), 0, "");
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].0, "pl");
+        assert_eq!(split[1].0, "en");
+
+        cfg.multi_lang = MultiLang::Parallel;
+        assert_eq!(request_specs(&cfg, None, 0, "").len(), 2);
+    }
+
+    #[test]
+    fn context_is_dropped_when_disabled() {
+        let mut cfg = Config::default();
+        cfg.langs = vec!["pl".to_string()];
+        cfg.use_context = false;
+        let specs = request_specs(&cfg, None, 0, "sekret");
+        assert_eq!(specs[0].1.pre_context, "");
+    }
+
+    #[test]
+    fn merge_interleaves_languages_dedupes_and_caps() {
+        let merged = merge(
+            &[outcome("pl", &["dom", "dam"]), outcome("en", &["dom", "done"])],
+            8,
+        );
+        let texts: Vec<&str> = merged.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["dom", "dam", "done"], "round-robin, duplicate dropped");
+        assert_eq!(merged[0].lang, "pl");
+
+        let capped: Vec<String> = merge(
+            &[outcome("pl", &["a", "b", "c"]), outcome("en", &["d", "e"])],
+            3,
+        )
+        .iter()
+        .map(|c| c.text.clone())
+        .collect();
+        assert_eq!(capped.len(), 3);
+    }
+
+    #[test]
+    fn merge_ignores_failed_languages() {
+        let failed = Outcome {
+            gen: 1,
+            lang: "de".to_string(),
+            result: Err("timeout".to_string()),
+        };
+        let merged = merge(&[failed, outcome("en", &["hi"])], 8);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].lang, "en");
+    }
+}

@@ -32,19 +32,18 @@
           src = pkgs.lib.cleanSource ./.;
 
           cargoLock.lockFile = ./Cargo.lock;
-          # FILL ME IN after changing Cargo.lock: run
-          #   nix build .#handwriting-input 2>&1 | grep 'got:'
-          # and paste the hash it prints.
-          cargoHash = pkgs.lib.fakeHash;
+          # Hash of the vendored crate tarball from Cargo.lock. After changing
+          # dependencies, rebuild with a throwaway value (pkgs.lib.fakeHash) and
+          # paste the "got:" hash the build error prints.
+          cargoHash = "sha256-JZWqYCOyFtDQzBrM2Ui1pV2I6rojSrMUBXpyBw+J0ZE=";
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
           doCheck = true; # offline unit tests only
 
-          postInstall = /* sh */ ''
+          postInstall = ''
             wrapProgram $out/bin/handwriting-input \
-              --prefix LD_LIBRARY_PATH : "${runtimeLibs}:/run/opengl-driver/lib" \
-              --set VK_DRIVER_FILES "\${VK_DRIVER_FILES:-/run/opengl-driver/share/vulkan/icd.d}"
+              --prefix LD_LIBRARY_PATH : "${runtimeLibs}:/run/opengl-driver/lib"
           '';
 
           meta = {

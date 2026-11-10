@@ -27,9 +27,12 @@ impl Stroke {
         self.points.is_empty()
     }
 
+    /// `[ [x...], [y...], [] ]` with integer pixel coordinates, as the
+    /// original app sent them (`Math.round`).
     pub fn to_json(&self) -> Value {
-        let xs: Vec<Value> = self.points.iter().map(|p| json!((p[0] as f64).round())).collect();
-        let ys: Vec<Value> = self.points.iter().map(|p| json!((p[1] as f64).round())).collect();
+        let round = |v: f32| v.round().clamp(i32::MIN as f32, i32::MAX as f32) as i64;
+        let xs: Vec<Value> = self.points.iter().map(|p| json!(round(p[0]))).collect();
+        let ys: Vec<Value> = self.points.iter().map(|p| json!(round(p[1]))).collect();
         json!([xs, ys, []])
     }
 }
@@ -113,4 +116,55 @@ pub fn build_request(ink: &Ink, width: u32, height: u32, ctx: &RequestContext) -
         request["use_vertical_writing"] = json!(false);
     }
     json!({ "options": "enable_pre_space", "requests": [request] })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stroke_drops_points_that_would_only_bloat_the_request() {
+        let mut s = Stroke::default();
+        s.push(10.0, 20.0);
+        s.push(10.2, 20.1); // same spot, within tolerance
+        s.push(10.0, 20.0);
+        s.push(14.0, 20.0); // moved enough to count
+        assert_eq!(s.points.len(), 2);
+    }
+
+    #[test]
+    fn stroke_json_is_x_list_y_list_empty() {
+        let mut s = Stroke::default();
+        s.push(1.4, 9.6);
+        s.push(40.0, 60.0);
+        let json = s.to_json();
+        let outer = json.as_array().expect("stroke is an array");
+        assert_eq!(outer.len(), 3, "format is [xs, ys, []]");
+        assert_eq!(outer[0], json!([1, 40]), "coordinates are rounded");
+        assert_eq!(outer[1], json!([10, 60]));
+        assert_eq!(outer[2], json!([]));
+    }
+
+    #[test]
+    fn ink_wraps_every_stroke_and_clears() {
+        let mut ink = Ink::default();
+        assert!(ink.is_empty());
+        let mut a = Stroke::default();
+        a.push(0.0, 0.0);
+        a.push(5.0, 5.0);
+        ink.strokes.push(a);
+        let json = ink.to_json();
+        assert_eq!(json.as_array().map(|v| v.len()), Some(1));
+        ink.clear();
+        assert!(ink.is_empty());
+        assert_eq!(ink.to_json(), json!([]));
+    }
+
+    #[test]
+    fn request_context_picks_a_starting_language() {
+        let single = RequestContext::new(json!("pl"), String::new(), 8, true);
+        assert_eq!(single.starting_language, "pl");
+        let combined = RequestContext::new(json!(["de", "fr"]), String::new(), 8, true);
+        assert_eq!(combined.starting_language, "de");
+    }
 }

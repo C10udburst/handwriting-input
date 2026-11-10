@@ -78,7 +78,12 @@ pub enum MultiLang {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(
+    default,
+    rename_all = "kebab-case",
+    // A typo in the config should be an error, not a silently ignored option.
+    deny_unknown_fields
+)]
 pub struct Config {
     pub langs: Vec<String>,
     pub server_url: String,
@@ -163,5 +168,67 @@ impl Config {
         self.num_candidates = self.num_candidates.clamp(1, 64);
         self.height = self.height.clamp(120, 2000);
         self.context_chars = self.context_chars.clamp(0, 512);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_files_inherit_the_defaults() {
+        let cfg: Config = toml::from_str("langs = [\"pl\", \"en\"]\nheight = 420\n").unwrap();
+        assert_eq!(cfg.langs, vec!["pl", "en"]);
+        assert_eq!(cfg.height, 420);
+        assert_eq!(cfg.num_candidates, Config::default().num_candidates);
+        assert_eq!(cfg.send, SendMode::Auto);
+    }
+
+    #[test]
+    fn options_use_kebab_case_names() {
+        let cfg: Config = toml::from_str(
+            "send = \"input-method\"\ntheme = \"light\"\nposition = \"center\"\nlayer = \"overlay\"\nmulti-lang = \"parallel\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.send, SendMode::InputMethod);
+        assert_eq!(cfg.theme, ThemeMode::Light);
+        assert_eq!(cfg.position, PositionMode::Center);
+        assert_eq!(cfg.layer, LayerMode::Overlay);
+        assert_eq!(cfg.multi_lang, MultiLang::Parallel);
+    }
+
+    #[test]
+    fn unknown_options_are_reported_instead_of_ignored() {
+        let err = toml::from_str::<Config>("not-an-option = 1").unwrap_err().to_string();
+        assert!(err.contains("not-an-option"), "got: {err}");
+    }
+
+    #[test]
+    fn normalize_repairs_useless_values() {
+        let mut cfg = Config::default();
+        cfg.langs = vec!["".to_string(), "  ".to_string()];
+        cfg.num_candidates = 0;
+        cfg.height = 1;
+        cfg.normalize();
+        assert_eq!(cfg.langs, vec!["en".to_string()]);
+        assert_eq!(cfg.num_candidates, 1);
+        assert_eq!(cfg.height, 120);
+    }
+
+    #[test]
+    fn a_missing_file_is_created_with_defaults_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("handwriting-config-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = fs::remove_file(&path);
+
+        let first = Config::load(&path).expect("defaults");
+        assert!(path.is_file(), "the default file should be written");
+
+        let mut changed = first.clone();
+        changed.height = 444;
+        fs::write(&path, toml::to_string_pretty(&changed).unwrap()).unwrap();
+        assert_eq!(Config::load(&path).unwrap().height, 444);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
